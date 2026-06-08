@@ -1,0 +1,418 @@
+'<div style="padding:14px;background:#fff;border-radius:16px;border:1.5px dashed #E2E8F0;text-align:center;color:var(--muted);font-size:14px;cursor:pointer;" onclick="showScreen(\'add-car\')">+ Add a car to continue</div>';
+  } else {
+    container.innerHTML = userCars.map(function(c, i) {
+      var isSelected = (selectedCar && selectedCar.id === c.id) || (!selectedCar && i === 0);
+      if (isSelected && !selectedCar) selectedCar = c;
+      return '<div class="car-option '+(isSelected ? 'selected' : '')+'" onclick="selectCarForBooking('+i+')">' +
+        '<div style="font-size:24px;flex-shrink:0;">' + (c.car_type === 'SUV' ? '🚙' : c.car_type === 'Pickup' ? '🛻' : '🚗') + '</div>' +
+        '<div style="flex:1;">' +
+          '<div style="font-weight:700;font-size:14px;margin-bottom:2px;">'+c.make+' '+c.model+'</div>' +
+          '<div style="font-size:12px;color:var(--muted);">'+c.plate+' &middot; '+c.colour+'</div>' +
+        '</div>' +
+        '<div class="car-option-check">'+(isSelected ? '✓' : '')+'</div>' +
+      '</div>';
+    }).join('');
+  }
+}
+
+function selectCarForBooking(index) {
+  selectedCar = userCars[index];
+  renderBookCarSelector();
+  updateBookingCost();
+}
+
+function renderServiceMenu() {
+  var container = document.getElementById('book-service-menu');
+  var services = selectedPoint.services || [];
+  if (!services.length) {
+    container.innerHTML = '<div style="color:var(--muted);font-size:13px;padding:12px 0;">No services available here.</div>';
+    selectedService = null;
+    return;
+  }
+  if (!selectedService) selectedService = services[0];
+  container.innerHTML = services.map(function(s, i) {
+    var isSelected = (selectedService && selectedService.id === s.id);
+    return '<div class="car-option '+(isSelected ? 'selected' : '')+'" onclick="selectServiceForBooking('+i+')" style="margin-bottom:8px;">' +
+      '<div style="flex:1;">' +
+        '<div style="font-weight:700;font-size:14px;">'+s.name+'</div>' +
+        '<div style="font-size:12px;color:var(--muted);">KSh '+Number(s.price).toLocaleString()+'</div>' +
+      '</div>' +
+      '<div class="car-option-check">'+(isSelected ? '✓' : '')+'</div>' +
+    '</div>';
+  }).join('');
+}
+
+function selectServiceForBooking(index) {
+  selectedService = selectedPoint.services[index];
+  renderServiceMenu();
+  updateBookingCost();
+}
+
+function updateBookingCost() {
+  if (!selectedService) {
+    document.getElementById('book-wash-price').textContent = '—';
+    document.getElementById('booking-total').textContent = '—';
+    return;
+  }
+  var sPrice = Number(selectedService.price) || 0;
+  document.getElementById('book-wash-price').textContent = 'KSh ' + sPrice.toLocaleString();
+  
+  var isTrial = isOnTrial(currentUser);
+  document.getElementById('book-app-fee-row').style.display = isTrial ? 'flex' : 'none';
+  
+  var total = sPrice + (isTrial ? APP_BOOKING_FEE : 0);
+  document.getElementById('booking-total').textContent = 'KSh ' + total.toLocaleString();
+}
+
+async function loadSlots() {
+  var date = document.getElementById('book-date').value;
+  var container = document.getElementById('time-slots');
+  if (!date) return;
+  container.innerHTML = '<div style="color:var(--muted);font-size:13px;grid-column:span 3">Loading...</div>';
+  selectedSlot = null;
+  try {
+    var existing = await getBookingsByDate(date);
+    var bookedMap = {};
+    (existing || []).forEach(function(b) {
+      if (b.wash_point_id === selectedPoint.id && b.status !== 'cancelled') {
+        bookedMap[b.time] = true;
+      }
+    });
+    container.innerHTML = SLOTS.map(function(s) {
+      var isBooked = bookedMap[s];
+      if (isBooked) return '<div class="slot booked">'+s+'</div>';
+      return '<div class="slot" onclick="selectSlot(this, \''+s+'\')">'+s+'</div>';
+    }).join('');
+  } catch(e) {
+    container.innerHTML = '<div style="color:var(--danger);font-size:13px;grid-column:span 3">Failed to load times.</div>';
+  }
+}
+
+function selectSlot(el, time) {
+  document.querySelectorAll('.slot').forEach(function(s) { s.classList.remove('selected'); });
+  el.classList.add('selected');
+  selectedSlot = time;
+}
+
+function confirmBooking() {
+  if (!selectedCar) { toast('Please select or add a car.', true); return; }
+  if (!selectedService) { toast('Please select a service.', true); return; }
+  if (!selectedSlot) { toast('Please select a time slot.', true); return; }
+  var date = document.getElementById('book-date').value;
+  if (!date) { toast('Please select a date.', true); return; }
+
+  var totalAmount = Number(selectedService.price) + (isOnTrial(currentUser) ? APP_BOOKING_FEE : 0);
+
+  document.getElementById('mpesa-amount').textContent = 'KSh ' + totalAmount.toLocaleString();
+  document.getElementById('mpesa-plan-name').textContent = selectedPoint.name + ' - ' + selectedService.name;
+  document.getElementById('mpesa-phone').value = currentUser.phone || '';
+  
+  pendingBooking = {
+    user_email: currentUser.email,
+    wash_point_id: selectedPoint.id,
+    wash_point_name: selectedPoint.name,
+    date: date,
+    time: selectedSlot,
+    car_id: selectedCar.id,
+    car_plate: selectedCar.plate,
+    service_id: selectedService.id,
+    service_name: selectedService.name,
+    amount: totalAmount,
+    status: 'pending' 
+  };
+  
+  showScreen('mpesa');
+}
+
+function mpesaBack() {
+  showScreen('book');
+}
+
+async function triggerSTK() {
+  var phone = document.getElementById('mpesa-phone').value.trim();
+  if (!phone) { toast('Please enter a phone number.', true); return; }
+  
+  setBtn('pay-btn', true, 'Processing...');
+  var statusEl = document.getElementById('mpesa-status');
+  statusEl.className = 'mpesa-status pending';
+  statusEl.textContent = 'Check your phone for the M-Pesa prompt...';
+  statusEl.classList.remove('hidden');
+
+  setTimeout(async function() {
+    try {
+      pendingBooking.status = 'confirmed';
+      var res = await createBooking(pendingBooking);
+      var b = res[0];
+      
+      statusEl.className = 'mpesa-status success';
+      statusEl.textContent = 'Payment successful!';
+      
+      document.getElementById('conf-location').textContent = b.wash_point_name;
+      document.getElementById('conf-car').textContent = b.car_plate;
+      document.getElementById('conf-service').textContent = b.service_name;
+      document.getElementById('conf-date').textContent = b.date;
+      document.getElementById('conf-time').textContent = b.time;
+      document.getElementById('conf-total').textContent = 'KSh ' + b.amount.toLocaleString();
+      
+      nextBookingCode = 'WP-' + b.id.substring(0,6).toUpperCase();
+      
+      setTimeout(function() {
+        setBtn('pay-btn', false, 'Pay Now');
+        statusEl.classList.add('hidden');
+        showScreen('confirmed');
+      }, 1500);
+      
+    } catch(e) {
+      statusEl.className = 'mpesa-status error';
+      statusEl.textContent = 'Booking failed: ' + e.message;
+      setBtn('pay-btn', false, 'Pay Now');
+    }
+  }, 3000); 
+}
+
+function showQRFromConfirm() {
+  document.getElementById('qr-code-display').textContent = nextBookingCode;
+  var qinfo = document.getElementById('qr-info');
+  qinfo.innerHTML = 
+    '<div class="qr-info-row"><span>Location</span><strong>'+pendingBooking.wash_point_name+'</strong></div>'+
+    '<div class="qr-info-row"><span>Date & Time</span><strong>'+pendingBooking.date+' '+pendingBooking.time+'</strong></div>'+
+    '<div class="qr-info-row"><span>Car</span><strong>'+pendingBooking.car_plate+'</strong></div>';
+  
+  document.getElementById('qr-canvas').innerHTML = '';
+  new QRCode(document.getElementById('qr-canvas'), {
+    text: nextBookingCode,
+    width: 200, height: 200,
+    colorDark: "#0B1437", colorLight: "#ffffff"
+  });
+  showScreen('qr');
+}
+
+function openNextBookingQR() {
+  if(!nextBookingCode) { toast('No upcoming bookings.'); return; }
+  showQRFromConfirm();
+}
+
+function renderHome() {
+  document.getElementById('home-name').textContent = currentUser.name.split(' ')[0];
+  document.getElementById('home-avatar').textContent = currentUser.name.charAt(0).toUpperCase();
+  
+  var p = SUB_PLANS.find(function(plan) { return plan.id === currentUser.sub_plan; });
+  document.getElementById('home-plan').textContent = p ? p.name : 'None';
+  document.getElementById('home-cars').textContent = userCars.length + (p ? '/' + p.car_limit : '');
+  
+  var loyalty = getTier(currentUser.loyalty_points || 0);
+  document.getElementById('home-loyalty-tier').textContent = loyalty.name;
+  document.getElementById('home-loyalty-icon').textContent = loyalty.icon;
+
+  var isTrial = isOnTrial(currentUser);
+  var badge = document.getElementById('home-badge');
+  if (isTrial) {
+    badge.className = 'sub-badge badge-trial';
+    badge.textContent = 'Trial (' + getTrialDaysLeft(currentUser) + ' days)';
+    document.getElementById('home-renewal-label').textContent = 'Trial ends';
+    var d = new Date(currentUser.created_at);
+    d.setDate(d.getDate() + 30);
+    document.getElementById('home-renewal').textContent = d.toLocaleDateString();
+  } else if (currentUser.sub_status === 'active') {
+    badge.className = 'sub-badge badge-active';
+    badge.textContent = 'Active';
+    document.getElementById('home-renewal-label').textContent = 'Renews';
+    document.getElementById('home-renewal').textContent = '1st of month'; 
+  } else {
+    badge.className = 'sub-badge badge-expired';
+    badge.textContent = 'Expired';
+    document.getElementById('home-renewal').textContent = '—';
+  }
+}
+
+function renderProfile() {
+  document.getElementById('prof-name').textContent = currentUser.name;
+  document.getElementById('prof-email').textContent = currentUser.email;
+  document.getElementById('prof-phone').textContent = currentUser.phone;
+  document.getElementById('prof-avatar').textContent = currentUser.name.charAt(0).toUpperCase();
+
+  document.getElementById('prof-plan').textContent = currentUser.sub_plan_name || 'None';
+  document.getElementById('prof-status').textContent = currentUser.sub_status || 'Inactive';
+  document.getElementById('prof-car-limit').textContent = currentUser.sub_car_limit || '0';
+  document.getElementById('prof-renew').textContent = isOnTrial(currentUser) ? getTrialDaysLeft(currentUser) + ' days left' : 'N/A';
+
+  var carList = document.getElementById('prof-cars-list');
+  if (!userCars.length) {
+    carList.innerHTML = '<div style="color:var(--muted);font-size:14px;text-align:center;padding:14px 0;">No cars yet</div>';
+  } else {
+    carList.innerHTML = userCars.map(function(c) {
+      return '<div class="car-item">' +
+        '<div class="car-item-icon">' + (c.car_type === 'SUV' ? '🚙' : c.car_type === 'Pickup' ? '🛻' : '🚗') + '</div>' +
+        '<div class="car-item-info">' +
+          '<div class="car-item-name">'+c.make+' '+c.model+'</div>' +
+          '<div class="car-item-plate">'+c.plate+'</div>' +
+          '<div class="car-item-type">'+(c.car_type||'Standard')+'</div>' +
+        '</div>' +
+        '<div class="car-item-del" onclick="deleteCar(\''+c.id+'\')">🗑️</div>' +
+      '</div>';
+    }).join('');
+  }
+}
+
+function renderPlans() {
+  var banner = document.getElementById('plans-trial-banner');
+  if (isOnTrial(currentUser)) {
+    banner.innerHTML = '<div class="trial-banner">' +
+      '<div class="trial-banner-icon">🎁</div>' +
+      '<div style="flex:1">' +
+        '<div class="trial-banner-title">Free Trial Active</div>' +
+        '<div class="trial-banner-sub">Try everything risk-free.</div>' +
+      '</div>' +
+      '<div>' +
+        '<div class="trial-days-left">' + getTrialDaysLeft(currentUser) + '</div>' +
+        '<div class="trial-days-label">Days Left</div>' +
+      '</div>' +
+    '</div>';
+  } else { banner.innerHTML = ''; }
+
+  var container = document.getElementById('plans-content');
+  container.innerHTML = SUB_PLANS.map(function(p) {
+    var isCurrent = currentUser.sub_plan === p.id;
+    return '<div class="plan-card '+(p.popular ? 'popular' : '')+'">' +
+      (p.popular ? '<div class="popular-badge">Most Popular</div>' : '') +
+      '<div class="plan-name">'+p.icon+' '+p.name+'</div>' +
+      '<div class="plan-cars">Up to '+p.car_limit+' car'+(p.car_limit>1?'s':'')+'</div>' +
+      '<div class="plan-price">KSh '+p.price.toLocaleString()+'<span>/'+p.billing+'</span></div>' +
+      '<ul class="plan-features">' +
+        '<li>Unlimited bookings</li>' +
+        '<li>Cancel anytime</li>' +
+        '<li>Access to all points</li>' +
+      '</ul>' +
+      '<button class="btn '+(isCurrent ? 'btn-outline' : 'btn-primary')+'" onclick="changePlan(\''+p.id+'\')" '+(isCurrent?'disabled':'')+'>' +
+        (isCurrent ? 'Current Plan' : 'Select Plan') +
+      '</button>' +
+    '</div>';
+  }).join('');
+}
+
+async function changePlan(planId) {
+  if(!confirm('Are you sure you want to change your plan?')) return;
+  var plan = SUB_PLANS.find(function(p) { return p.id === planId; });
+  try {
+    await updateUser(currentUser.email, {
+      sub_plan: plan.id,
+      sub_plan_name: plan.name,
+      sub_car_limit: plan.car_limit
+    });
+    currentUser.sub_plan = plan.id;
+    currentUser.sub_plan_name = plan.name;
+    currentUser.sub_car_limit = plan.car_limit;
+    localStorage.setItem('splashpass_user', JSON.stringify(currentUser));
+    toast('Plan updated successfully!');
+    renderPlans();
+  } catch(e) { toast('Error: '+e.message, true); }
+}
+
+async function addCar() {
+  var make = document.getElementById('addcar-make').value.trim();
+  var model = document.getElementById('addcar-model').value.trim();
+  var colour = document.getElementById('addcar-colour').value.trim();
+  var plate = document.getElementById('addcar-plate').value.trim().toUpperCase();
+  var type = document.getElementById('addcar-type').value;
+  var err = document.getElementById('addcar-error');
+  
+  if (!make || !model || !plate || !type) { err.textContent = 'All fields are required.'; return; }
+  
+  var limit = currentUser.sub_car_limit || 1;
+  if (userCars.length >= limit) {
+    err.textContent = 'Car limit reached for your plan ('+limit+'). Upgrade to add more.';
+    return;
+  }
+  
+  setBtn('addcar-save-btn', true, 'Saving...');
+  try {
+    await createCar({ user_email: currentUser.email, make: make, model: model, colour: colour, plate: plate, car_type: type });
+    userCars = await getCarsByEmail(currentUser.email);
+    
+    document.getElementById('addcar-make').value = '';
+    document.getElementById('addcar-model').value = '';
+    document.getElementById('addcar-colour').value = '';
+    document.getElementById('addcar-plate').value = '';
+    document.getElementById('addcar-type').value = '';
+    
+    showScreen('profile');
+    toast('Car added successfully!');
+  } catch(e) {
+    err.textContent = 'Error: ' + e.message;
+  } finally {
+    setBtn('addcar-save-btn', false, 'Save Car');
+  }
+}
+
+async function deleteCar(id) {
+  if (!confirm('Remove this car?')) return;
+  try {
+    await deleteCarRow(id);
+    userCars = await getCarsByEmail(currentUser.email);
+    renderProfile();
+    toast('Car removed.');
+  } catch(e) { toast('Failed to remove car.', true); }
+}
+
+function openChangePassword() {
+  document.getElementById('cp-current').value = '';
+  document.getElementById('cp-new').value = '';
+  document.getElementById('cp-confirm').value = '';
+  document.getElementById('cp-error').textContent = '';
+  document.getElementById('cp-success').style.display = 'none';
+  showScreen('change-password');
+}
+
+async function changePassword() {
+  var current = document.getElementById('cp-current').value;
+  var newP = document.getElementById('cp-new').value;
+  var confirmP = document.getElementById('cp-confirm').value;
+  var err = document.getElementById('cp-error');
+  
+  if(!current || !newP || !confirmP) { err.textContent = 'All fields required.'; return; }
+  if(newP.length < 8) { err.textContent = 'New password must be at least 8 chars.'; return; }
+  if(newP !== confirmP) { err.textContent = 'New passwords do not match.'; return; }
+  
+  setBtn('cp-btn', true, 'Updating...');
+  try {
+    await new Promise(r => setTimeout(r, 1000));
+    err.textContent = '';
+    document.getElementById('cp-success').style.display = 'block';
+    setTimeout(function(){ showScreen('profile'); }, 1500);
+  } catch(e) { err.textContent = e.message; }
+  finally { setBtn('cp-btn', false, 'Update Password'); }
+}
+
+function checkDeleteReady() {
+  var text = document.getElementById('da-confirm-text').value;
+  var btn = document.getElementById('da-btn');
+  if (text === 'DELETE') {
+    btn.disabled = false;
+    btn.style.opacity = '1';
+  } else {
+    btn.disabled = true;
+    btn.style.opacity = '.4';
+  }
+}
+
+async function deleteAccount() {
+  var pass = document.getElementById('da-password').value;
+  var err = document.getElementById('da-error');
+  if(!pass) { err.textContent = 'Password is required to delete account.'; return; }
+  
+  document.getElementById('da-step1').style.display = 'none';
+  document.getElementById('da-processing').style.display = 'block';
+  
+  try {
+    await new Promise(r => setTimeout(r, 2000));
+    logout();
+    toast('Account successfully deleted.');
+  } catch(e) {
+    document.getElementById('da-step1').style.display = 'block';
+    document.getElementById('da-processing').style.display = 'none';
+    err.textContent = e.message;
+  }
+}
+</script>
+</body>
+</html>
